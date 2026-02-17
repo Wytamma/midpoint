@@ -1,7 +1,7 @@
 # Midpoint Rooting App
 
 A lightweight, single-page web app for **midpoint rooting phylogenetic trees** in Newick format.
-Built with **PhyloJS** for tree manipulation and **Phylocanvas.gl** for interactive visualization.
+Built with [**PhyloJS**](https://clockor2.github.io/phylojs/) for tree manipulation and [**Phylocanvas.gl**](https://www.phylocanvas.gl/) for interactive visualization.
 
 ## Features
 
