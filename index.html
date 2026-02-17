@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Midpoint-root a Newick tree</title>
+
+    <!-- Tailwind (CDN for a single-file static page) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Phylocanvas (WebGL) -->
+    <script src="https://unpkg.com/@phylocanvas/phylocanvas.gl@latest/dist/bundle.min.js"></script>
+
+    <!-- PhyloJS -->
+    <script src="https://unpkg.com/phylojs@latest/lib/dist/phylojs.min.js"></script>
+
+    <style>
+      #tree {
+        height: 72vh;
+        min-height: 420px;
+      }
+    </style>
+  </head>
+
+  <body class="bg-slate-50 text-slate-900">
+    <div class="mx-auto max-w-6xl px-4 py-8">
+      <header class="mb-6 flex flex-col gap-2">
+        <h1 class="text-2xl font-semibold tracking-tight">Midpoint-root a Newick tree</h1>
+      </header>
+
+      <main class="grid gap-4 lg:grid-cols-12">
+        <section class="lg:col-span-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-slate-800">Input</h2>
+
+          </div>
+
+          <input id="file" type="file" accept=".nwk,.newick,.tree,.txt" class="hidden" />
+
+          <button
+            id="dropzone"
+            type="button"
+            class="mt-3 flex w-full items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-sm text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-200"
+          >
+            <span>
+              Drag and drop a Newick file here, or <span class="font-medium text-slate-800">click to upload</span>
+            </span>
+          </button>
+
+          <label for="newick" class="mt-4 block text-sm font-medium text-slate-700">Or paste Newick</label>
+          <textarea
+            id="newick"
+            class="mt-2 h-44 w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs leading-relaxed text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+            spellcheck="false"
+            placeholder="(A:0.1,B:0.2,(C:0.15,D:0.15):0.05);"
+          >(A:0.1,B:0.2,(C:0.15,D:0.15):0.05);</textarea>
+
+          <p id="status" class="mt-3 text-sm text-slate-600"></p>
+        </section>
+
+        <section class="lg:col-span-8 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-slate-800">Tree</h2>
+            <div class="flex gap-2">
+              <button
+                id="btnMidpoint"
+                class="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled
+              >
+                Midpoint root
+              </button>
+              <button
+                id="btnDownload"
+                class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled
+              >
+                Download Newick
+              </button>
+            </div>
+          </div>
+          <div id="tree" class="mt-3 overflow-hidden rounded-xl ring-1 ring-slate-200"></div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+
+      const els = {
+        file: $("file"),
+        dropzone: $("dropzone"),
+        newick: $("newick"),
+        status: $("status"),
+        btnMidpoint: $("btnMidpoint"),
+        btnDownload: $("btnDownload"),
+        tree: $("tree"),
+      };
+
+      let treeObj = null; // phylojs Tree
+      let currentNewick = "";
+      let rootedNewick = "";
+      let canvas = null; // PhylocanvasGL
+
+      function setStatus(msg, tone = "info") {
+        const classes = {
+          info: "text-slate-600",
+          ok: "text-emerald-700",
+          err: "text-rose-700",
+        };
+        els.status.className = `mt-3 text-sm ${classes[tone] || classes.info}`;
+        els.status.textContent = msg;
+      }
+
+      function downloadText(filename, text) {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      function getPhylocanvasCtor() {
+        return (window.phylocanvas && window.phylocanvas.PhylocanvasGL) || window.PhylocanvasGL;
+      }
+
+      function getTreeType() {
+        const tt = window.phylocanvas && window.phylocanvas.TreeTypes;
+        return tt ? tt.Rectangular : undefined;
+      }
+
+      function computeCanvasSize(container) {
+        const rect = container.getBoundingClientRect();
+        return {
+          width: Math.max(320, Math.floor(rect.width || 800)),
+          height: Math.max(320, Math.floor(rect.height || 500)),
+        };
+      }
+
+      function ensureCanvas(initialNewick) {
+        if (canvas) return canvas;
+
+        const ctor = getPhylocanvasCtor();
+        if (!ctor) throw new Error("PhylocanvasGL constructor not found. Did the bundle load?");
+
+        const type = getTreeType();
+        if (!type) throw new Error("phylocanvas.TreeTypes not found. Ensure you are using the standalone bundle.");
+
+        const size = computeCanvasSize(els.tree);
+        canvas = new ctor(els.tree, {
+          size,
+          type,
+          source: initialNewick,
+          showLabels: true,
+          showLeafLabels: true,
+        });
+
+        // Responsive resize
+        window.addEventListener("resize", () => {
+          if (!canvas) return;
+          const next = computeCanvasSize(els.tree);
+          if (typeof canvas.resize === "function") {
+            canvas.resize(next.width, next.height);
+          } else if (typeof canvas.setProps === "function") {
+            canvas.setProps({ size: next });
+            if (typeof canvas.render === "function") canvas.render();
+          }
+        });
+
+        return canvas;
+      }
+
+      function renderNewick(newickStr) {
+        const c = ensureCanvas(newickStr);
+        if (typeof c.setProps !== "function" || typeof c.render !== "function") {
+          throw new Error("Unexpected PhylocanvasGL API: setProps/render missing.");
+        }
+        c.setProps({ source: newickStr });
+        c.render();
+        if (typeof c.fitInPanel === "function") c.fitInPanel();
+      }
+
+      function readNewick(newickStr) {
+        if (!window.phylojs || typeof phylojs.readNewick !== "function") {
+          throw new Error("phylojs.readNewick is not available. Check the phylojs bundle.");
+        }
+        const t = phylojs.readNewick(newickStr);
+        if (!t || !Array.isArray(t.nodeList)) {
+          throw new Error("Failed to parse Newick.");
+        }
+        return t;
+      }
+
+      function writeNewick(t) {
+        if (window.phylojs && typeof phylojs.writeNewick === "function") return phylojs.writeNewick(t);
+        if (window.phylojs && typeof phylojs.stringifyNewick === "function") return phylojs.stringifyNewick(t);
+        if (t && typeof t.toString === "function") return t.toString();
+        throw new Error("No Newick writer available in this phylojs build.");
+      }
+
+      // Midpoint rooting using phylojs primitives: diameter -> midpoint -> tree.reroot(A, prop)
+      function midpointRootUsingPrimitives(t) {
+        if (!t || !Array.isArray(t.nodeList)) throw new Error("Tree is not initialised.");
+        if (typeof t.reroot !== "function") throw new Error("tree.reroot is not available in this phylojs build.");
+
+        const nodes = t.nodeList;
+        const leaves = (t.leafList && t.leafList.length)
+          ? t.leafList
+          : nodes.filter((n) => (typeof n.isLeaf === "function" ? n.isLeaf() : (n.children?.length ?? 0) === 0));
+        if (!leaves.length) throw new Error("Tree has no leaves.");
+
+        const adj = new Map();
+        const addEdge = (u, v, w) => {
+          if (!adj.has(u)) adj.set(u, []);
+          if (!adj.has(v)) adj.set(v, []);
+          adj.get(u).push({ node: v, w });
+          adj.get(v).push({ node: u, w });
+        };
+
+        for (const parent of nodes) {
+          for (const child of parent.children || []) {
+            const w = child.branchLength ?? 0;
+            if (!Number.isFinite(w) || w < 0) throw new Error("Branch lengths must be finite and non-negative.");
+            addEdge(parent, child, w);
+          }
+        }
+
+        const farthestFrom = (src) => {
+          const dist = new Map();
+          const prev = new Map();
+          const stack = [src];
+          dist.set(src, 0);
+          prev.set(src, null);
+
+          while (stack.length) {
+            const u = stack.pop();
+            const du = dist.get(u);
+            for (const { node: v, w } of adj.get(u) || []) {
+              if (!dist.has(v)) {
+                dist.set(v, du + w);
+                prev.set(v, u);
+                stack.push(v);
+              }
+            }
+          }
+
+          let far = src;
+          let best = -Infinity;
+          for (const n of leaves) {
+            const d = dist.get(n);
+            if (d !== undefined && d > best) {
+              best = d;
+              far = n;
+            }
+          }
+          return { far, dist, prev };
+        };
+
+        const uPass = farthestFrom(leaves[0]);
+        const u = uPass.far;
+        const vPass = farthestFrom(u);
+        const v = vPass.far;
+        const diameter = vPass.dist.get(v);
+        if (!Number.isFinite(diameter) || diameter <= 0) return;
+
+        const path = [];
+        let cur = v;
+        while (cur) {
+          path.push(cur);
+          cur = vPass.prev.get(cur);
+        }
+        path.reverse();
+
+        const edgeWeight = (a, b) => {
+          for (const e of adj.get(a) || []) if (e.node === b) return e.w;
+          throw new Error("Edge lookup failed.");
+        };
+
+        const half = diameter / 2;
+        let acc = 0;
+
+        for (let i = 0; i < path.length - 1; i++) {
+          const n = path[i];
+          const m = path[i + 1];
+          const w = edgeWeight(n, m);
+
+          if (acc + w >= half) {
+            const offset = half - acc;
+
+            let A;
+            let prop;
+
+            if (m.parent === n) {
+              A = m;
+              const bl = A.branchLength ?? 0;
+              if (bl <= 0) throw new Error("Cannot midpoint-root on a zero-length edge.");
+              prop = (bl - offset) / bl;
+            } else if (n.parent === m) {
+              A = n;
+              const bl = A.branchLength ?? 0;
+              if (bl <= 0) throw new Error("Cannot midpoint-root on a zero-length edge.");
+              prop = offset / bl;
+            } else {
+              throw new Error("Tree parent pointers are inconsistent.");
+            }
+
+            t.reroot(A, Math.min(1, Math.max(0, prop)));
+            return;
+          }
+
+          acc += w;
+        }
+      }
+
+      function normaliseNewick(s) {
+        const trimmed = (s || "").trim();
+        if (!trimmed) return "";
+        return trimmed.endsWith(";") ? trimmed : trimmed + ";";
+      }
+
+      function updateFromNewick(raw) {
+        const nwk = normaliseNewick(raw);
+        if (!nwk) {
+          treeObj = null;
+          currentNewick = "";
+          rootedNewick = "";
+          els.btnMidpoint.disabled = true;
+          els.btnDownload.disabled = true;
+          setStatus("", "info");
+          return;
+        }
+
+        try {
+          treeObj = readNewick(nwk);
+          currentNewick = nwk;
+          rootedNewick = nwk; // until rerooted
+          renderNewick(nwk);
+          els.btnMidpoint.disabled = false;
+          els.btnDownload.disabled = false;
+          setStatus("Loaded.", "ok");
+        } catch (e) {
+          treeObj = null;
+          currentNewick = "";
+          rootedNewick = "";
+          els.btnMidpoint.disabled = true;
+          els.btnDownload.disabled = true;
+          setStatus(e?.message || String(e), "err");
+        }
+      }
+
+      // --- File input + drag-and-drop ---
+      function readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(new Error("Failed to read file."));
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.readAsText(file);
+        });
+      }
+
+      async function handleFile(file) {
+        if (!file) return;
+        try {
+          const text = await readFileAsText(file);
+          els.newick.value = text;
+          updateFromNewick(text);
+        } catch (e) {
+          setStatus(e?.message || String(e), "err");
+        }
+      }
+
+      els.dropzone.addEventListener("click", () => els.file.click());
+      els.file.addEventListener("change", () => handleFile(els.file.files && els.file.files[0]));
+
+      const prevent = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+
+      ["dragenter", "dragover", "dragleave", "drop"].forEach((evt) => {
+        els.dropzone.addEventListener(evt, prevent);
+      });
+
+      els.dropzone.addEventListener("dragenter", () => {
+        els.dropzone.classList.add("border-slate-400", "bg-slate-100");
+      });
+      els.dropzone.addEventListener("dragleave", () => {
+        els.dropzone.classList.remove("border-slate-400", "bg-slate-100");
+      });
+      els.dropzone.addEventListener("drop", (e) => {
+        els.dropzone.classList.remove("border-slate-400", "bg-slate-100");
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        handleFile(file);
+      });
+
+      // --- Auto-render on paste/edit (debounced) ---
+      let debounceTimer = null;
+      els.newick.addEventListener("input", () => {
+        window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => updateFromNewick(els.newick.value), 200);
+      });
+
+      // --- Buttons ---
+      els.btnMidpoint.addEventListener("click", () => {
+        if (!treeObj) return;
+        try {
+          midpointRootUsingPrimitives(treeObj);
+          rootedNewick = normaliseNewick(writeNewick(treeObj));
+          renderNewick(rootedNewick);
+          setStatus("Midpoint rooted.", "ok");
+        } catch (e) {
+          setStatus(e?.message || String(e), "err");
+        }
+      });
+
+      els.btnDownload.addEventListener("click", () => {
+        if (!rootedNewick) return;
+        downloadText("midpoint_rooted.tree.nwk", rootedNewick);
+      });
+
+      // Initial empty state
+      setStatus("Drop a file or paste Newick to begin.", "info");
+      ensureCanvas("(A:0.1,B:0.2,(C:0.15,D:0.15):0.05);");
+      renderNewick("(A:0.1,B:0.2,(C:0.15,D:0.15):0.05);");
+    </script>
+  </body>
+</html>
